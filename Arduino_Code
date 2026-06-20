@@ -1,0 +1,213 @@
+#include <fathimasafaev-project-1_inferencing.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <math.h>
+
+/* OLED SETTINGS */
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+/* PIN DEFINITIONS */
+#define SENSOR_PIN 34
+#define BUZZER_PIN 25
+
+/* FEATURE BUFFER */
+float features[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
+
+/* FINAL THRESHOLD */
+/* NORMAL -> 9W bulb */
+/* ANOMALY -> 12W + 12W + 9W */
+
+float THRESHOLD = 0.67;
+
+/* COLLECT SENSOR DATA */
+void collect_data() {
+
+    for (int i = 0; i < EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE; i++) {
+
+        int raw = analogRead(SENSOR_PIN);
+
+        /* NORMALIZE ADC VALUE */
+        features[i] = raw / 4095.0;
+
+        delay(5);
+    }
+}
+
+/* EDGE IMPULSE FUNCTION */
+int raw_feature_get_data(size_t offset, size_t length, float *out_ptr) {
+
+    memcpy(out_ptr, features + offset, length * sizeof(float));
+
+    return 0;
+}
+
+void setup() {
+
+    Serial.begin(115200);
+
+    pinMode(BUZZER_PIN, OUTPUT);
+
+    digitalWrite(BUZZER_PIN, LOW);
+
+    /* OLED INITIALIZATION */
+    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+
+        Serial.println("OLED FAILED");
+
+        while (1);
+    }
+
+    /* OLED START SCREEN */
+    display.clearDisplay();
+
+    display.setTextSize(2);
+
+    display.setTextColor(WHITE);
+
+    display.setCursor(10, 20);
+
+    display.println("SYSTEM OK");
+
+    display.display();
+
+    delay(2000);
+
+    Serial.println("====================================");
+    Serial.println("LOAD ANOMALY DETECTION STARTED");
+    Serial.println("====================================");
+}
+
+void loop() {
+
+    /* STEP 1 : COLLECT DATA */
+    collect_data();
+
+    /* STEP 2 : CREATE SIGNAL */
+    signal_t signal;
+
+    signal.total_length = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
+
+    signal.get_data = &raw_feature_get_data;
+
+    /* STEP 3 : RUN EDGE IMPULSE MODEL */
+    ei_impulse_result_t result = {0};
+
+    EI_IMPULSE_ERROR res = run_classifier(&signal, &result, false);
+
+    if (res != EI_IMPULSE_OK) {
+
+        Serial.println("Classifier Error");
+
+        return;
+    }
+
+    /* STEP 4 : GET PREDICTIONS */
+    float normal = 0;
+
+    float anomaly = 0;
+
+    for (uint16_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
+
+        String label = ei_classifier_inferencing_categories[i];
+
+        if (label == "normal") {
+
+            normal = result.classification[i].value;
+        }
+
+        else if (label == "anomaly") {
+
+            anomaly = result.classification[i].value;
+        }
+    }
+
+    /* STEP 5 : CALCULATE RMS */
+    float sum = 0;
+
+    for (int i = 0; i < EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE; i++) {
+
+        sum += features[i] * features[i];
+    }
+
+    float rms = sqrt(sum / EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE);
+
+    /* FINAL DECISION */
+
+    bool isAnomaly = false;
+
+    if (rms > THRESHOLD) {
+
+        isAnomaly = true;
+    }
+
+    else {
+
+        isAnomaly = false;
+    }
+
+    /* OLED DISPLAY */
+
+    display.clearDisplay();
+
+    display.setTextColor(WHITE);
+
+    display.setTextSize(1);
+
+    display.setCursor(0, 0);
+
+    display.println("LOAD STATUS");
+
+    display.println("--------------------");
+
+    if (isAnomaly) {
+
+        digitalWrite(BUZZER_PIN, HIGH);
+
+        display.setTextSize(2);
+
+        display.setCursor(0, 25);
+
+        display.println("NORMAL");
+
+        Serial.println("STATUS: NORMAL");
+    }
+
+    else {
+
+        digitalWrite(BUZZER_PIN, LOW);
+
+        display.setTextSize(2);
+
+        display.setCursor(10, 25);
+
+        display.println("ANOMALY");
+
+        Serial.println("STATUS: ANOMALY");
+    }
+
+    /* SHOW RMS VALUE */
+
+    display.setTextSize(1);
+
+    display.setCursor(0, 55);
+
+    display.display();
+
+    /* SERIAL MONITOR OUTPUT */
+
+    Serial.print(" | anomaly: ");
+
+    Serial.print(anomaly, 3);
+
+    Serial.print(" | normal: ");
+
+    Serial.println(normal, 3);
+
+    Serial.println("--------------------------------");
+
+    delay(1000);
+}
